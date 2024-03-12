@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/graymeta/stow"
+	"github.com/flyteorg/stow"
 
 	"github.com/pkg/errors"
 	"gopkg.in/kothar/go-backblaze.v0"

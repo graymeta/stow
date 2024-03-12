@@ -1,12 +1,14 @@
 package swift
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"strings"
 
 	"github.com/pkg/errors"
 
-	"github.com/graymeta/stow"
+	"github.com/flyteorg/stow"
 	"github.com/ncw/swift"
 )
 
@@ -23,6 +25,11 @@ func (c *container) ID() string {
 
 func (c *container) Name() string {
 	return c.id
+}
+
+func (c *container) PreSignRequest(_ context.Context, _ stow.ClientMethod, _ string,
+	_ stow.PresignRequestParams) (response stow.PresignResponse, err error) {
+	return stow.PresignResponse{}, fmt.Errorf("unsupported")
 }
 
 func (c *container) Item(id string) (stow.Item, error) {

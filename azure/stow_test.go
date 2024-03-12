@@ -2,27 +2,71 @@ package azure
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cheekybits/is"
-	"github.com/graymeta/stow"
-	"github.com/graymeta/stow/test"
+	"github.com/flyteorg/stow"
+	"github.com/flyteorg/stow/test"
 )
 
 var (
-	azureaccount = os.Getenv("AZUREACCOUNT")
-	azurekey     = os.Getenv("AZUREKEY")
+	azureaccount         = os.Getenv("AZUREACCOUNT")
+	azurekey             = os.Getenv("AZUREKEY")
+	azureBigFileTestSize = os.Getenv("AZUREBIGFILETESTSIZEMB")
 )
 
-func TestStow(t *testing.T) {
-	if azureaccount == "" || azurekey == "" {
-		t.Skip("skipping test because missing either AZUREACCOUNT or AZUREKEY")
+func presignedRequestPreparer(method stow.ClientMethod, r *http.Request) error {
+	if method == stow.ClientMethodPut {
+		r.Header.Set("x-ms-blob-type", "BlockBlob")
+	}
+	return nil
+}
+
+func TestStowWithSharedKeyAuth(t *testing.T) {
+	if azureaccount == "" {
+		t.Skip("skipping test because missing AZUREACCOUNT")
+	}
+	if azurekey == "" {
+		t.Skip("skipping test because missing AZUREKEY")
 	}
 
 	cfg := stow.ConfigMap{"account": azureaccount, "key": azurekey}
 	test.All(t, "azure", cfg)
+	test.ContainerPreSignRequest(t, "azure", cfg, presignedRequestPreparer)
+	test.ExistingContainerDoesNotProduceAnError(t, "azure", cfg)
+}
+
+func TestStowWithDefaultADAuth(t *testing.T) {
+	if azureaccount == "" {
+		t.Skip("skipping test because missing AZUREACCOUNT")
+	}
+
+	cfg := stow.ConfigMap{"account": azureaccount}
+	test.All(t, "azure", cfg)
+	test.ContainerPreSignRequest(t, "azure", cfg, presignedRequestPreparer)
+	test.ExistingContainerDoesNotProduceAnError(t, "azure", cfg)
+}
+
+func TestBigFileUpload(t *testing.T) {
+	if azureBigFileTestSize == "" {
+		t.Skip("skipping test because missing AZUREBIGFILETESTSIZEMB is not set")
+	}
+	if azureaccount == "" {
+		t.Skip("skipping test because missing AZUREACCOUNT")
+	}
+
+	fileSize, err := strconv.ParseInt(azureBigFileTestSize, 10, 64)
+	if err != nil {
+		t.Fatalf("Invalid value for AZUREBIGFILETESTSIZEMB: %s", azureBigFileTestSize)
+	}
+
+	cfg := stow.ConfigMap{"account": azureaccount}
+	test.BigFileUpload(t, "azure", cfg, fileSize*1000*1000)
 }
 
 func TestEtagCleanup(t *testing.T) {
@@ -46,35 +90,56 @@ func TestEtagCleanup(t *testing.T) {
 	}
 }
 
-func TestPrepMetadataSuccess(t *testing.T) {
+func TestMetaMapRoundTrip(t *testing.T) {
 	is := is.New(t)
 
-	m := make(map[string]string)
-	m["one"] = "two"
-	m["3"] = "4"
-	m["ninety-nine"] = "100"
+	stowMap := make(map[string]interface{})
+	stowMap["one"] = "two"
+	stowMap["3"] = "4"
+	stowMap["ninety-nine"] = "100"
 
-	m2 := make(map[string]interface{})
-	for key, value := range m {
-		m2[key] = value
+	expectedAzureMap := make(map[string]*string)
+	for key, value := range stowMap {
+		vStr, _ := value.(string)
+		expectedAzureMap[key] = &vStr
 	}
 
 	//returns map[string]interface
-	returnedMap, err := prepMetadata(m2)
+	azureCompatMap, err := makeAzureCompatMetadataMap(stowMap)
 	is.NoErr(err)
 
-	if !reflect.DeepEqual(returnedMap, m) {
-		t.Errorf("Expected map (%+v) and returned map (%+v) are not equal.", m, returnedMap)
+	if !reflect.DeepEqual(azureCompatMap, expectedAzureMap) {
+		t.Errorf("Expected map (%+v) and returned map (%+v) are not equal.", expectedAzureMap, azureCompatMap)
+	}
+
+	convertedStowMap := makeStowCompatMetadataMap(azureCompatMap)
+	if !reflect.DeepEqual(stowMap, convertedStowMap) {
+		t.Errorf("Expected map (%+v) and returned map (%+v) are not equal.", stowMap, convertedStowMap)
 	}
 }
 
-func TestPrepMetadataFailureWithNonStringValues(t *testing.T) {
+func TestMakeAzureCompatMetadataMapFailureWithNonStringValues(t *testing.T) {
 	is := is.New(t)
 
 	m := make(map[string]interface{})
 	m["float"] = 8.9
 	m["number"] = 9
 
-	_, err := prepMetadata(m)
+	_, err := makeAzureCompatMetadataMap(m)
 	is.Err(err)
+}
+
+func TestRemovedConfigOptionsCausesFailure(t *testing.T) {
+	is := is.New(t)
+	for _, removedKey := range removedConfigKeys {
+		cfg := stow.ConfigMap{"account": "ignore"}
+		cfg[removedKey] = "anything"
+		err := stow.Validate("azure", cfg)
+		is.Err(err)
+		if !strings.Contains(err.Error(), "removed config option used") ||
+			!strings.Contains(err.Error(), removedKey) {
+			is.Failf("Unexpected error message: %s", err.Error())
+		}
+
+	}
 }

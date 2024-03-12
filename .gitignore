@@ -30,3 +30,4 @@ tests.xml
 vendor/
 
 .vscode/
+.terragrunt-cache

@@ -2,14 +2,20 @@ package google
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"net/http"
+	"strconv"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/pkg/errors"
 	"google.golang.org/api/iterator"
 
-	"github.com/graymeta/stow"
+	"github.com/flyteorg/stow"
 )
+
+const googleMetadataPrefix = "x-goog-meta-"
 
 type Container struct {
 	// Name is needed to retrieve items.
@@ -33,8 +39,36 @@ func (c *Container) Name() string {
 }
 
 // Bucket returns the google bucket attributes
-func (c *Container) Bucket() *storage.BucketHandle{
+func (c *Container) Bucket() *storage.BucketHandle {
 	return c.client.Bucket(c.name)
+}
+
+func (c *Container) PreSignRequest(_ context.Context, clientMethod stow.ClientMethod, id string,
+	params stow.PresignRequestParams) (response stow.PresignResponse, err error) {
+	headers := make([]string, 0, 3)
+	var requestHeaders map[string]string
+	if len(params.HttpMethod) == 0 {
+		switch clientMethod {
+		case stow.ClientMethodGet:
+			params.HttpMethod = http.MethodGet
+		case stow.ClientMethodPut:
+			params.HttpMethod = http.MethodPut
+			requestHeaders = map[string]string{"Content-Length": strconv.Itoa(len(params.ContentMD5)), "Content-MD5": params.ContentMD5}
+			if params.AddContentMD5Metadata {
+				headers = append(headers, fmt.Sprintf("%s%s: %s", googleMetadataPrefix, stow.FlyteContentMD5, params.ContentMD5))
+				requestHeaders[fmt.Sprintf("%s%s", googleMetadataPrefix, stow.FlyteContentMD5)] = params.ContentMD5
+			}
+		}
+	}
+
+	url, error := c.Bucket().SignedURL(id, &storage.SignedURLOptions{
+		Method:  params.HttpMethod,
+		Expires: time.Now().Add(params.ExpiresIn),
+		MD5:     params.ContentMD5,
+		Headers: headers,
+	})
+
+	return stow.PresignResponse{Url: url, RequiredRequestHeaders: requestHeaders}, error
 }
 
 // Item returns a stow.Item instance of a container based on the
@@ -94,17 +128,25 @@ func (c *Container) Put(name string, r io.Reader, size int64, metadata map[strin
 	}
 
 	w := obj.NewWriter(c.ctx)
+	w.ObjectAttrs.Metadata = merge(w.ObjectAttrs.Metadata, mdPrepped)
 	if _, err := io.Copy(w, r); err != nil {
 		return nil, err
 	}
-	w.Close()
-
-	attr, err := obj.Update(c.ctx, storage.ObjectAttrsToUpdate{Metadata: mdPrepped})
-	if err != nil {
+	if err = w.Close(); err != nil {
 		return nil, err
 	}
 
-	return c.convertToStowItem(attr)
+	return c.convertToStowItem(w.Attrs())
+}
+
+func merge(metadata ...map[string]string) map[string]string {
+	res := map[string]string{}
+	for _, mt := range metadata {
+		for k, v := range mt {
+			res[k] = v
+		}
+	}
+	return res
 }
 
 func (c *Container) convertToStowItem(attr *storage.ObjectAttrs) (stow.Item, error) {

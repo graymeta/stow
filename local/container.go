@@ -1,14 +1,16 @@
 package local
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/graymeta/stow"
+	"github.com/flyteorg/stow"
 )
 
 type container struct {
@@ -29,6 +31,11 @@ func (c *container) URL() *url.URL {
 		Scheme: "file",
 		Path:   filepath.Clean(c.path),
 	}
+}
+
+func (c *container) PreSignRequest(_ context.Context, _ stow.ClientMethod, _ string,
+	_ stow.PresignRequestParams) (response stow.PresignResponse, err error) {
+	return stow.PresignResponse{}, fmt.Errorf("unsupported")
 }
 
 func (c *container) CreateItem(name string) (stow.Item, io.WriteCloser, error) {

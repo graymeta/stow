@@ -1,21 +1,21 @@
 package azure
 
 import (
+	"context"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"io"
 	"net/url"
 	"sync"
 	"time"
 
-	az "github.com/Azure/azure-sdk-for-go/storage"
-	"github.com/graymeta/stow"
-	"github.com/pkg/errors"
+	"github.com/flyteorg/stow"
 )
 
 type item struct {
 	id         string
 	container  *container
-	client     *az.BlobStorageClient
-	properties az.BlobProperties
+	client     *blob.Client
+	properties *BlobProps
 	url        url.URL
 	metadata   map[string]interface{}
 	infoOnce   sync.Once
@@ -36,8 +36,7 @@ func (i *item) Name() string {
 }
 
 func (i *item) URL() *url.URL {
-	u := i.client.GetContainerReference(i.container.id).GetBlobReference(i.id).GetURL()
-	url, _ := url.Parse(u)
+	url, _ := url.Parse(i.client.URL())
 	url.Scheme = "azure"
 	return url
 }
@@ -47,64 +46,40 @@ func (i *item) Size() (int64, error) {
 }
 
 func (i *item) Open() (io.ReadCloser, error) {
-	return i.client.GetContainerReference(i.container.id).GetBlobReference(i.id).Get(nil)
-}
-
-func (i *item) ETag() (string, error) {
-	return i.properties.Etag, nil
-}
-
-func (i *item) LastMod() (time.Time, error) {
-	return time.Time(i.properties.LastModified), nil
-}
-
-func (i *item) Metadata() (map[string]interface{}, error) {
-	err := i.ensureInfo()
-	if err != nil {
-		return nil, errors.Wrap(err, "retrieving metadata")
-	}
-
-	return i.metadata, nil
-}
-
-func (i *item) ensureInfo() error {
-	if i.metadata == nil {
-		i.infoOnce.Do(func() {
-			blob := i.client.GetContainerReference(i.container.Name()).GetBlobReference(i.Name())
-			infoErr := blob.GetMetadata(nil)
-			if infoErr != nil {
-				i.infoErr = infoErr
-				return
-			}
-
-			mdParsed, infoErr := parseMetadata(blob.Metadata)
-			if infoErr != nil {
-				i.infoErr = infoErr
-				return
-			}
-			i.metadata = mdParsed
-		})
-	}
-
-	return i.infoErr
-}
-
-func (i *item) getInfo() (stow.Item, error) {
-	itemInfo, err := i.container.Item(i.ID())
+	ctx := context.Background()
+	dlResp, err := i.client.DownloadStream(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	return itemInfo, nil
+	return dlResp.Body, nil
+}
+
+func (i *item) ETag() (string, error) {
+	return cleanEtag(string(i.properties.ETag)), nil
+}
+
+func (i *item) LastMod() (time.Time, error) {
+	return i.properties.LastModified, nil
+}
+
+func (i *item) Metadata() (map[string]interface{}, error) {
+	return i.metadata, nil
 }
 
 // OpenRange opens the item for reading starting at byte start and ending
 // at byte end.
 func (i *item) OpenRange(start, end uint64) (io.ReadCloser, error) {
-	opts := &az.GetBlobRangeOptions{
-		Range: &az.BlobRange{
-			Start: start,
-			End:   end,
+	ctx := context.Background()
+	resp, err := i.client.DownloadStream(ctx, &blob.DownloadStreamOptions{
+		Range: blob.HTTPRange{
+			Offset: int64(start),
+			Count:  int64(end) - int64(start) + 1,
 		},
+	})
+
+	if err != nil {
+		return nil, err
 	}
-	return i.client.GetContainerReference(i.container.id).GetBlobReference(i.id).GetRange(opts)
+
+	return resp.Body, nil
 }

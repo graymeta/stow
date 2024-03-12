@@ -2,6 +2,7 @@
 package s3
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,12 +12,15 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/cheekybits/is"
-	"github.com/graymeta/stow"
-	"github.com/graymeta/stow/test"
+	"github.com/flyteorg/stow"
+	"github.com/flyteorg/stow/test"
 )
 
 func TestStow(t *testing.T) {
@@ -35,6 +39,36 @@ func TestStow(t *testing.T) {
 	}
 
 	test.All(t, "s3", config)
+}
+
+func TestPreSignedURL(t *testing.T) {
+	is := is.New(t)
+	accessKeyId := os.Getenv("S3ACCESSKEYID")
+	secretKey := os.Getenv("S3SECRETKEY")
+	region := os.Getenv("S3REGION")
+
+	if accessKeyId == "" || secretKey == "" || region == "" {
+		t.Skip("skipping test because missing one or more of S3ACCESSKEYID S3SECRETKEY S3REGION")
+	}
+
+	config := stow.ConfigMap{
+		"access_key_id": accessKeyId,
+		"secret_key":    secretKey,
+		"region":        region,
+	}
+
+	location, err := stow.Dial("s3", config)
+	is.NoErr(err)
+
+	container, err := location.Container("flyte-demo")
+	ctx := context.Background()
+	res, err := container.PreSignRequest(ctx, stow.ClientMethodPut, "blah/bloh/fileon", stow.PresignRequestParams{
+		ExpiresIn: time.Hour,
+	})
+
+	is.NoErr(err)
+	t.Log(res)
+	assert.NotEmpty(t, res)
 }
 
 func TestEtagCleanup(t *testing.T) {

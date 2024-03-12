@@ -2,8 +2,10 @@ package test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"github.com/stretchr/testify/assert"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -18,7 +20,7 @@ import (
 	"time"
 
 	"github.com/cheekybits/is"
-	"github.com/graymeta/stow"
+	"github.com/flyteorg/stow"
 )
 
 // All runs a generic suite of tests for Stow storage
@@ -28,19 +30,12 @@ import (
 // via stow.Register.
 // Locations should be empty.
 func All(t *testing.T, kind string, config stow.Config) {
-	is := is.New(t)
+	is, location := initTest(t, kind, config)
 	isWindows := false
 
 	if runtime.GOOS == "windows" {
 		isWindows = true
 	}
-
-	err := stow.Validate(kind, config)
-	is.NoErr(err)
-
-	location, err := stow.Dial(kind, config)
-	is.NoErr(err)
-	is.OK(location)
 
 	// testing for file descriptors won't work on Windows
 	var startFDs int
@@ -289,6 +284,114 @@ func All(t *testing.T, kind string, config stow.Config) {
 	is.Equal(found, 3) // should find three items
 }
 
+type PresignedRequestPreparer func(method stow.ClientMethod, r *http.Request) error
+
+func ContainerPreSignRequest(
+	t *testing.T, kind string, config stow.Config, requestPreparer PresignedRequestPreparer,
+) {
+	is, location := initTest(t, kind, config)
+
+	testContainer, err := location.CreateContainer("stowtest" + randName(10))
+	is.NoErr(err)
+
+	defer func() {
+		location.RemoveContainer(testContainer.ID())
+	}()
+
+	u, err := testContainer.PreSignRequest(
+		context.Background(),
+		stow.ClientMethodPut,
+		"presigned-put.txt",
+		stow.PresignRequestParams{
+			ExpiresIn: time.Minute * 5,
+		},
+	)
+
+	is.NoErr(err)
+	assert.NoError(t, err)
+	client := &http.Client{}
+	content := []byte("stowtest")
+	req, err := http.NewRequest("PUT", u, bytes.NewReader(content))
+	is.NoErr(err)
+	req.ContentLength = int64(len(content))
+	req.Header.Set("Content-Type", "text/plain")
+	err = requestPreparer(stow.ClientMethodPut, req)
+	is.NoErr(err)
+
+	resp, err := client.Do(req)
+	is.NoErr(err)
+	if resp.StatusCode != 201 && resp.StatusCode != 200 {
+		io.Copy(os.Stdout, resp.Body)
+	}
+	is.Equal(201, resp.StatusCode)
+
+	u, err = testContainer.PreSignRequest(
+		context.TODO(),
+		stow.ClientMethodGet,
+		"presigned-put.txt",
+		stow.PresignRequestParams{
+			ExpiresIn: time.Minute * 5,
+		},
+	)
+
+	req, err = http.NewRequest("GET", u, nil)
+	is.NoErr(err)
+	err = requestPreparer(stow.ClientMethodGet, req)
+	is.NoErr(err)
+
+	resp, err = client.Do(req)
+	is.NoErr(err)
+	is.Equal(200, resp.StatusCode)
+	respBytes, err := io.ReadAll(resp.Body)
+	is.NoErr(err)
+	is.Equal(content, respBytes)
+}
+
+func BigFileUpload(t *testing.T, kind string, config stow.Config, fileSize int64) {
+	is, location := initTest(t, kind, config)
+
+	testContainer, err := location.CreateContainer("uploadtest" + randName(10))
+	is.NoErr(err)
+
+	defer func() {
+		location.RemoveContainer(testContainer.ID())
+	}()
+
+	f, err := os.CreateTemp(".", "temp-file")
+	is.NoErr(err)
+	defer func() {
+		os.Remove(f.Name())
+	}()
+	f.Truncate(fileSize)
+	item, err := testContainer.Put("test-upload-file", f, fileSize, map[string]interface{}{})
+	is.NoErr(err)
+	itemSize, err := item.Size()
+	is.NoErr(err)
+	is.Equal(fileSize, itemSize)
+}
+
+func ExistingContainerDoesNotProduceAnError(t *testing.T, kind string, config stow.Config) {
+	is, location := initTest(t, kind, config)
+	testContainer, err := location.CreateContainer("stowtest-" + randName(10))
+	is.NoErr(err)
+	defer func() { location.RemoveContainer(testContainer.Name()) }()
+	dupAttempt, err := location.CreateContainer(testContainer.Name())
+	is.NoErr(err)
+	is.Equal(testContainer.Name(), dupAttempt.Name())
+}
+
+func initTest(t *testing.T, kind string, config stow.Config) (is.I, stow.Location) {
+	is := is.New(t)
+
+	err := stow.Validate(kind, config)
+	is.NoErr(err)
+
+	location, err := stow.Dial(kind, config)
+	is.NoErr(err)
+	is.OK(location)
+	return is, location
+}
+
 func totalNetFDs(t *testing.T) (int, []byte) {
 	lsof, err := exec.Command("lsof", "-b", "-n", "-p", strconv.Itoa(os.Getpid())).Output()
 	if err != nil {
@@ -408,10 +511,9 @@ func checkMetadata(t *testing.T, is is.I, item stow.Item, md map[string]interfac
 		is.Failf("error retrieving item metadata: %v", err)
 	}
 
-	t.Logf("Item metadata: %v", itemMD)
-	t.Logf("Expected item metadata: %v", md)
-
 	if !reflect.DeepEqual(itemMD, md) {
+		t.Logf("Item metadata: %v", itemMD)
+		t.Logf("Expected item metadata: %v", md)
 		return errors.New("metadata mismatch")
 	}
 	return nil

@@ -1,14 +1,19 @@
 package s3
 
 import (
+	"context"
+	"fmt"
 	"io"
+	"strconv"
 	"strings"
+
+	"github.com/aws/aws-sdk-go/aws/request"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/graymeta/stow"
+	"github.com/flyteorg/stow"
 	"github.com/pkg/errors"
 )
 
@@ -21,6 +26,46 @@ type container struct {
 	// region describes the AWS Availability Zone of the S3 Bucket.
 	region         string
 	customEndpoint string
+}
+
+func (c *container) PreSignRequest(ctx context.Context, clientMethod stow.ClientMethod, id string,
+	params stow.PresignRequestParams) (response stow.PresignResponse, err error) {
+
+	var req *request.Request
+	var requestHeaders map[string]string
+	switch clientMethod {
+	case stow.ClientMethodGet:
+		req, _ = c.client.GetObjectRequest(&s3.GetObjectInput{
+			Bucket: aws.String(c.name),
+			Key:    aws.String(id),
+		})
+	case stow.ClientMethodPut:
+		var contentMD5 *string
+		if len(params.ContentMD5) > 0 {
+			contentMD5 = aws.String(params.ContentMD5)
+		}
+
+		metadata := make(map[string]*string)
+		requestHeaders = map[string]string{"Content-Length": strconv.Itoa(len(params.ContentMD5)), "Content-MD5": params.ContentMD5}
+		if params.AddContentMD5Metadata {
+			metadata[stow.FlyteContentMD5] = aws.String(params.ContentMD5)
+			requestHeaders[fmt.Sprintf("x-amz-meta-%s", stow.FlyteContentMD5)] = params.ContentMD5
+		}
+
+		req, _ = c.client.PutObjectRequest(&s3.PutObjectInput{
+			Bucket:     aws.String(c.name),
+			Key:        aws.String(id),
+			ContentMD5: contentMD5,
+			Metadata:   metadata,
+		})
+	default:
+		return stow.PresignResponse{}, fmt.Errorf("unsupported client method [%v]", clientMethod.String())
+	}
+
+	req.SetContext(ctx)
+	url, err := req.Presign(params.ExpiresIn)
+
+	return stow.PresignResponse{Url: url, RequiredRequestHeaders: requestHeaders}, err
 }
 
 // ID returns a string value which represents the name of the container.
@@ -130,8 +175,9 @@ func (c *container) Put(name string, r io.Reader, size int64, metadata map[strin
 		Key:    aws.String(name),
 		Bucket: aws.String(c.name),
 	})
+
 	var etag string
-	if i.ETag != nil && err == nil {
+	if err == nil && i.ETag != nil {
 		etag = cleanEtag(*i.ETag)
 	}
 

@@ -1,10 +1,12 @@
 package oracle
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"strings"
 
-	"github.com/graymeta/stow"
+	"github.com/flyteorg/stow"
 	"github.com/ncw/swift"
 	"github.com/pkg/errors"
 )
@@ -15,6 +17,11 @@ type container struct {
 }
 
 var _ stow.Container = (*container)(nil)
+
+func (c *container) PreSignRequest(_ context.Context, _ stow.ClientMethod, _ string,
+	_ stow.PresignRequestParams) (response stow.PresignResponse, err error) {
+	return stow.PresignResponse{}, fmt.Errorf("unsupported")
+}
 
 // ID returns a string value representing a unique container, in this case it's
 // the Container's name.

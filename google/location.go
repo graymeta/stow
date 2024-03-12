@@ -10,7 +10,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 
-	"github.com/graymeta/stow"
+	"github.com/flyteorg/stow"
 )
 
 // A Location contains a client + the configurations used to create the client.
